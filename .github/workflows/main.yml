@@ -1,28 +1,99 @@
-# name: CI
+name: CI-CD
 
-# on:
-#   push:
-#     branches:
-#       - master
-#   pull_request:
-#     branches:
-#       - master
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
 
-# jobs:
-#   build-and-test:
-#     runs-on: ubuntu-latest
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: ecr-todolist-uvu-it3200-ansamaalsharif
+  ROLE_ARN: arn:aws:iam::888725257262:role/github-actions-uvu-it3200-ansamaalsharif
+  IMAGE_NAME: todolist
 
-#     steps:
-#       - name: Checkout code
-#         uses: actions/checkout@v2
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
-#       - name: Setup Node.js
-#         uses: actions/setup-node@v2
-#         with:
-#           node-version: '16'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-#       - name: Install dependencies
-#         run: npm ci
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '16'
 
-#       - name: Run tests
-#         run: npm test
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build Docker image
+        run: docker build -t $IMAGE_NAME:${{ github.sha }} .
+
+      - name: Scan image with Trivy
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed \
+            $IMAGE_NAME:${{ github.sha }}
+
+      - name: Save image
+        run: docker save $IMAGE_NAME:${{ github.sha }} -o image.tar
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: image.tar
+          retention-days: 1
+
+  cd:
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: image
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Authenticate to AWS with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Show active identity
+        run: aws sts get-caller-identity
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push
+        run: |
+          REGISTRY=${{ steps.ecr.outputs.registry }}
+          docker tag $IMAGE_NAME:${{ github.sha }} $REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+          docker tag $IMAGE_NAME:${{ github.sha }} $REGISTRY/$ECR_REPOSITORY:latest
+          docker push $REGISTRY/$ECR_REPOSITORY:${{ github.sha }}
+          docker push $REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Verify image in ECR
+        run: |
+          aws ecr describe-images --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=${{ github.sha }}
