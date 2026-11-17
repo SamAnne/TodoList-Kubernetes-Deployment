@@ -1,7 +1,7 @@
 variable "github_repository" {
   type        = string
   description = "GitHub repository allowed to push images, as owner/name."
-  default     = "SamAnne/TodoList"
+  default     = "SamAnne/TodoList-Kubernetes-Deployment"
 }
 
 resource "aws_ecr_repository" "todolist" {
